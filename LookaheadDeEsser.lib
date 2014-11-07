@@ -1,0 +1,148 @@
+/*
+ *  Copyright (C) 2014 Bart Brouns
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; version 2 of the License.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ */
+
+/*some building blocks where taken from or inspired on compressor-basics.dsp by Sampo Savolainen*/
+
+declare name      "LookAheadLimiter";
+declare author    "Bart Brouns";
+declare version   "0.1";
+declare copyright "(C) 2014 Bart Brouns";
+
+import ("music.lib");  //for linear2db
+import ("filter.lib");  //for deEsser
+
+
+//this implementation gives strange bugs:
+      //THRESH(t,x) = (x-t) * (t < x);
+//this one is OK:
+      //THRESH(t,x) = (x-t): max(0);
+//when used with:
+      //currentdown(x)      = 0-((currentLevel(x)):THRESH(threshold));
+currentLevel(x)     = ((abs(x)):linear2db);
+currentdown(x)      = 0-(((currentLevel(x))-threshold):max(0));
+currentDeEss(x)     = 0-(((currentLevel(x:highpass(3,deEssSideFreq)))-threshold):max(0));
+      
+// smoothing function, attack coefficient "a", release coefficient "r" and signal x
+      //releaseEnv(r, x) = x:(env(r):rateLimiter)~_
+releaseEnv(r, x) = x:(env(r))~_
+with {
+env (r, prevx, x)= select2( (x > prevx), x, (x*r)+(prevx * (1-r))     );
+};
+
+// smoothing function, attack coefficient "a", release coefficient "r" and signal x
+SMOOTH(a, r, prevx, x) = 
+	(x     *      select2( (x < prevx), a, r )) + 
+	(prevx * (1 - select2( (x < prevx), a, r)));
+
+
+limPowerScale(x) =((x>=0)*(1/(x+1)))+((x<0)* ((x*-1)+1));
+LookaheadDeEsser(x,lastdown) =
+      // this one should be more efficient:
+      // ( 0:seq(i,maxPredelay,(currentdown(x)@(i):max(lastdown)),_: min )),
+      // yet this one is more efficient:
+      ( 0:seq(i,maxPredelay,(((i+1)>(maxPredelay-holdTime))*(currentDeEss(x)@(i):max(lastdown))),_: min )),
+(0: seq(i,maxAttackTime, currentDeEss(x)@((i+1-maxAttackTime+maxPredelay):max(0))*(((i+1)/maxAttackTime):attackShaper),_: min))
+:min
+with {
+           attackShaper(x)= tanh(x:pow(attack:attackScale)*(attack*8+.1))/tanh(attack*8+.1);
+      //attackShaper(x)= tanh(x:pow(attack:attackScale)*mult)/tanh(mult);
+      //attackShaper(x)= x:pow(attack:attackScale);
+           };
+
+LookaheadSeq(x,lastdown) =
+      // this one should be more efficient:
+      // ( 0:seq(i,maxPredelay,(currentdown(x)@(i):max(lastdown)),_: min )),
+      // yet this one is more efficient:
+      ( 0:seq(i,maxPredelay,(((i+1)>(maxPredelay-holdTime))*(currentdown(x)@(i):max(lastdown))),_: min )),
+(0: seq(i,maxAttackTime, currentdown(x)@((i+1-maxAttackTime+maxPredelay):max(0))*(((i+1)/maxAttackTime):attackShaper),_: min))
+:min
+with {
+           attackShaper(x)= tanh(x:pow(attack:attackScale)*(attack*8+.1))/tanh(attack*8+.1);
+      //attackShaper(x)= tanh(x:pow(attack:attackScale)*mult)/tanh(mult);
+      //attackShaper(x)= x:pow(attack:attackScale);
+           };
+      //tanh(x^(32)*20)/tanh(20)
+attackScale(x) = (x+1):pow(7); //from 0-1 to 1-128, just to make the knob fit the aural experience better
+
+      //rateLimit(release,prevx,x) = (prevx+newtangent:min(0))
+rateLimit(release,prevx,x) = (prevx+(tangent:min(release)))
+//:max(maxGR:linear2db)
+with {
+    tangent            = x- prevx;
+    newtangent         = select2(tangent>0,minus,plus):min(release);
+    plus               = tangent;//*(((abs(avgChange:mymeter )*-1):db2linear));
+    minus              = tangent;//*((abs(avgChange)*0.5):db2linear);
+    actualTangent      = prevx - prevx';
+      //:_+1:pow(decayPower)-1
+
+           avgChange          = (abs((actualTangent-actualTangent')):mean(rmsMaxSize))*decayMult:min(maxChange):(SMOOTH(IMattack, IMrelease) ~ _ );
+      //avgChange          = (abs((actualTangent-actualTangent')):integrate(rmsMaxSize))*decayMult:min(maxChange):(SMOOTH(IMattack, IMrelease) ~ _ );
+
+      //avgChange          = (abs((actualTangent-actualTangent')):pow(IMpower):integrate(IM_size):pow(1/IMpower))*decayMult:min(maxChange):(SMOOTH(IMattack, IMrelease) ~ _ );
+    //avgChange        = abs((actualTangent)-(actualTangent@1)):pow(IMpower):integrate(IM_size):pow(1/IMpower)*decayMult:_+1:pow(decayPower)-1:mymeter;
+    DoubleMaxTangent   = 1;//((abs(threshold)/maxPredelay)+(release/SR));
+      //integrate(size,x)  = (delaysum(size, x))/size;
+           delaysum(size)     = _ <: par(i,rmsMaxSize, @(i)*(i<size)) :> _;
+
+// the mean of n consecutive samples of a signal
+	// uses fixpoint to avoid the accumulation of
+	// rounding errors
+	mean(n) = float2fix : integrate(n) : fix2float : /(n);
+	
+	// the sliding sum of n consecutive samples of a signal
+	integrate(n,x) = x - x@n : +~_ ;
+	
+	// convertion between float and fix point
+	float2fix(x) = int(x*(1<<20));
+	fix2float(x) = float(x)/(1<<20);
+    };
+
+linearXfade(x,a,b) = a*(1-x),b*x : +;
+
+      //rateLimiter = (_<: _,(rateLimit(release) ~ _ ):linearXfade(ratelimit));
+      rateLimiter = (rateLimit(release) ~ _ );
+
+
+      //limiter(x) = (LookaheadPar (x,0):rateLimiter):(_,!):db2linear:meter ,x@(maxPredelay):*;
+limiter(x) = (LookaheadSeq(x):releaseEnv(logRelease))~_:meter:db2linear *x@(maxPredelay);
+      //limiter(x) = (LookaheadSeq(x):(_<:(releaseEnv(IMrelease),rateLimiter)):linearXfade(ratelimit))~_:meter:db2linear *x@(maxPredelay);
+
+deEsser(x) = x@(maxPredelay):peak_eq_cq(((LookaheadDeEsser(x):releaseEnv(logRelease))~_:meter),deEssFreq,deEsserQ);
+
+gainComputer(x) = (LookaheadSeq(x):releaseEnv(logRelease))~_;
+
+stereoGainComputerHalf (x,y,prevy) = ((((LookaheadSeq(x),(LookaheadSeq(x),(prevy:LookaheadSeq(y)):min)):linearXfade(link)):releaseEnv(logRelease))~(_<:_,_));
+
+stereoGainComputer(x,y) = (stereoGainComputerHalf(x,y),stereoGainComputerHalf(y,x))~(_,_ <: !,_,_,!);
+
+
+
+/*LookaheadPar(x,lastdown) = */
+stereoLimiter(x,y)  = stereoGainComputer(x,y) : (((_:meter:db2linear)*x@(maxPredelay),((_:meter:db2linear)*y@(maxPredelay))));
+           
+/*(*/
+/*(((((LookaheadSeq(x),(LookaheadSeq(x),LookaheadSeq(y):min)):linearXfade(link)):releaseEnv(logRelease))~(_<:_,_))~_),*/
+/*(((((LookaheadSeq(y),(LookaheadSeq(y),LookaheadSeq(x):min)):linearXfade(link)):releaseEnv(logRelease))~(_<:_,_))~_));*/
+
+
+      //(((((LookaheadSeq(x),(LookaheadSeq(x),LookaheadSeq(y):min)):linearXfade(link)):releaseEnv(logRelease))~(_<:_,_))~_:meter:db2linear*x@(maxPredelay)),
+      //(((((LookaheadSeq(y),(LookaheadSeq(y),LookaheadSeq(x):min)):linearXfade(link)):releaseEnv(logRelease))~(_<:_,_))~_:meter:db2linear*y@(maxPredelay)));
+
+/*( par(i,maxAttackTime, currentdown(x)@((i+1-maxAttackTime+maxPredelay):max(0))*(((i+1)/maxAttackTime):attackShaper)): seq(j,(log(maxAttackTime)/log(2)),par(k,maxAttackTime/(2:pow(j+1)),min)))*/
+/*:min*/
+/*with {*/
+    /*autoAttack     = (lastdown/threshold):min(1):AAmeter;*/
+    /*attackShaper(x)= x:pow(attack:attackScale);//atan((gainHS+0.0001)*128*x)/atan((gainHS+0.0001)*128);*/
+/*}*/
+/*;*/
+
+
