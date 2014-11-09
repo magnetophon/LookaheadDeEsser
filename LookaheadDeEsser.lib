@@ -29,7 +29,7 @@ import ("filter.lib");  //for deEsser
       //currentdown(x)      = 0-((currentLevel(x)):THRESH(threshold));
 currentLevel(x)     = ((abs(x)):linear2db);
 currentdown(x)      = 0-(((currentLevel(x))-threshold):max(0));
-currentDeEss(x)     = 0-(((currentLevel(x:highpass(3,deEssSideFreq)))-threshold):max(0));
+currentDeEss(x)     = (0-(((currentLevel(x:highpass(3,deEssSideFreq):lowpass(3,deEssSideLPfreq)))-threshold):max(0))):max(maxGR);
       
 // smoothing function, attack coefficient "a", release coefficient "r" and signal x
       //releaseEnv(r, x) = x:(env(r):rateLimiter)~_
